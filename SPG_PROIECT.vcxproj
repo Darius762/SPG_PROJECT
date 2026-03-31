@@ -139,9 +139,17 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="ambulance.cpp" />
+    <ClCompile Include="car.cpp" />
+    <ClCompile Include="collision.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="pedestrian.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ambulance.h" />
+    <ClInclude Include="car.h" />
+    <ClInclude Include="collision.h" />
+    <ClInclude Include="pedestrian.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>

@@ -6,19 +6,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <vector>
+#include <time.h>
+
+// ===== C1+C2: Include =====
+#include "car.h"
+#include "pedestrian.h"
+#include "collision.h"
+#include "ambulance.h"
 
 //CONSTANTE 
 #define TERRAIN_SIZE    256
 #define TERRAIN_SCALE   1.0f
 #define TERRAIN_HEIGHT  6.0f
 #define CUBE_SIZE       120.0f
+#ifndef PI
 #define PI              3.14159265f
+#endif
 #define ROAD_WIDTH      5.5f
 #define MAX_LIGHTS      8  
 
 //STRUCTURI 
 struct Vec2 { float x, z; };
-struct LightPos { float x, y, z; };  
+// LightPos e definit in collision.h  
 
 // CIRCUIT - puncte de control 
 static Vec2 trackPoints[] = {
@@ -40,16 +49,16 @@ GLuint texRoad;
 
 float camX = 0.0f, camY = 8.0f, camZ = 30.0f;
 float camYaw = 0.0f, camPitch = -15.0f;
-float camDist = 1.0f;       
-bool  firstPerson = false;  
+float camDist = 1.0f;
+bool  firstPerson = false;
 
 int   lastMouseX = -1, lastMouseY = -1;
 bool  leftDown = false, rightDown = false;
 int   winW = 1280, winH = 720;
 
 
-bool  nightMode = false;         // N toggle zi/noapte
-float sunDir[4] = { 0.6f,1.0f,0.4f,0.0f };  
+bool  nightMode = false;
+float sunDir[4] = { 0.6f,1.0f,0.4f,0.0f };
 
 
 std::vector<LightPos> polePositions;
@@ -59,6 +68,43 @@ float heightmap[TERRAIN_SIZE][TERRAIN_SIZE];
 
 
 std::vector<Vec2> trackSpline;
+
+// ===== C1+C2: Variabile =====
+Car playerCar;
+#define NUM_PEDESTRIANS 5
+Pedestrian pedestrians[NUM_PEDESTRIANS];
+std::vector<AABB> buildingBoxes;
+std::vector<KnockableCone> knockableCones;
+std::vector<CircleCollider> poleColliders;
+
+// C2: Ambulanta
+#define NUM_AMBULANCES 2
+Ambulance ambulances[NUM_AMBULANCES];
+
+// Taste sageti (separate de WASD)
+bool keyArrowUp = false, keyArrowDown = false;
+bool keyArrowLeft = false, keyArrowRight = false;
+
+// Timing
+float lastTime = 0.0f;
+float getDeltaTime() {
+    float current = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+    float dt = current - lastTime;
+    lastTime = current;
+    if (dt > 0.1f) dt = 0.1f;  // cap la 100ms
+    if (dt < 0.0f) dt = 0.016f;
+    return dt;
+}
+
+// Camera follow mode
+bool cameraFollow = false;  // C toggle
+
+// Lap counter
+int   lapCount = 0;
+bool  crossedStart = false;   // previne dubla contorizare
+int   lapTarget = 3;
+bool  raceWon = false;
+float winTimer = 0.0f;        // timer afisare mesaj victorie
 
 //INTERPOLARE CATMULL-ROM 
 Vec2 catmullRom(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, float t) {
@@ -96,7 +142,6 @@ void generateTerrain() {
         float dist = sqrtf(dx * dx + dz2 * dz2) * 2.0f;
         heightmap[z][x] = h * fmaxf(0.0f, 1.0f - dist) * TERRAIN_HEIGHT;
     }
-    // Aplatizeaza sub circuit
     for (int z = 0; z < TERRAIN_SIZE; z++)for (int x = 0; x < TERRAIN_SIZE; x++) {
         float wx = (x - TERRAIN_SIZE * 0.5f) * TERRAIN_SCALE;
         float wz = (z - TERRAIN_SIZE * 0.5f) * TERRAIN_SCALE;
@@ -130,9 +175,7 @@ GLuint loadTexture(const char* fn, unsigned char fr = 80, unsigned char fg = 80,
 }
 
 // SHADOW MATRIX 
-
 void shadowMatrix(float m[16], float lx, float ly, float lz, float lw, float py = 0.01f) {
-    
     float nx = 0, ny = 1, nz = 0, d = -py;
     float dot = nx * lx + ny * ly + nz * lz + d * lw;
     m[0] = dot - lx * nx; m[4] = -lx * ny; m[8] = -lx * nz; m[12] = -lx * d;
@@ -265,11 +308,9 @@ void drawTree(float x, float z, float h, float v) {
     }
 }
 
-//Stalp de iluminat cu pozitie stocata pentru umbre
 void drawLightPoleAt(float x, float z, float rot) {
     glDisable(GL_TEXTURE_2D);
     float ph = 6.5f, pr = 0.1f;
-    // Culoare stalpului depinde de zi/noapte
     if (nightMode) glColor3f(0.5f, 0.5f, 0.55f);
     else          glColor3f(0.4f, 0.4f, 0.45f);
     glBegin(GL_TRIANGLE_STRIP);
@@ -278,7 +319,6 @@ void drawLightPoleAt(float x, float z, float rot) {
     float brad = rot * PI / 180.0f, bx = cosf(brad) * 2.0f, bz = sinf(brad) * 2.0f;
     glColor3f(0.35f, 0.35f, 0.4f);
     glBegin(GL_LINES); glVertex3f(x, ph, z); glVertex3f(x + bx, ph + 0.3f, z + bz); glVertex3f(x + bx, ph + 0.3f, z + bz); glVertex3f(x + bx, ph - 0.5f, z + bz); glEnd();
-    // Lampa - mai stralucitoare noaptea
     if (nightMode) glColor3f(1.0f, 1.0f, 0.6f);
     else          glColor3f(0.9f, 0.88f, 0.6f);
     glPushMatrix(); glTranslatef(x + bx, ph - 0.3f, z + bz); glutSolidSphere(0.35f, 8, 6); glPopMatrix();
@@ -297,7 +337,6 @@ void drawBuilding(float x, float z, float w, float d, float h, float r, float g,
     }
     glColor3f(r * 0.55f, g * 0.55f, b * 0.55f);
     glBegin(GL_QUADS); glNormal3f(0, 1, 0); glVertex3f(x, h, z); glVertex3f(x + w, h, z); glVertex3f(x + w, h, z + d); glVertex3f(x, h, z + d); glEnd();
-    // Ferestre - se aprind noaptea
     if (nightMode) glColor3f(1.0f, 0.95f, 0.6f);
     else          glColor3f(0.5f, 0.75f, 0.95f);
     int floors = (int)(h / 2.0f), cols = (int)(w / 1.8f);
@@ -360,14 +399,12 @@ void drawBillboard(float x, float z, float rot, int cs) {
 }
 
 // DESENEAZA UMBRA UNUI OBIECT
-
 void setShadowMatrix(float lx, float ly, float lz, float lw) {
     float m[16];
     shadowMatrix(m, lx, ly, lz, lw, 0.05f);
     glMultMatrixf(m);
 }
 
-// Umbra unui stalp (cilindru proiectat)
 void drawPoleShadow(float x, float z) {
     float ph = 6.5f, pr = 0.25f;
     glBegin(GL_TRIANGLE_STRIP);
@@ -379,14 +416,11 @@ void drawPoleShadow(float x, float z) {
     glEnd();
 }
 
-// Umbra unui copac
 void drawTreeShadow(float x, float z, float h) {
     float cr = h * 0.38f, th = h * 0.38f;
-    
     glBegin(GL_TRIANGLE_STRIP);
     for (int i = 0; i <= 8; i++) { float a = (float)i / 8 * 2 * PI; glVertex3f(x + cosf(a) * 0.25f, 0.05f, z + sinf(a) * 0.25f); glVertex3f(x + cosf(a) * 0.15f, th, z + sinf(a) * 0.15f); }
     glEnd();
-    
     glBegin(GL_TRIANGLE_FAN);
     glVertex3f(x, th + h * 0.28f, z);
     for (int i = 0; i <= 10; i++) { float a = (float)i / 10 * 2 * PI; glVertex3f(x + cosf(a) * cr, th, z + sinf(a) * cr); }
@@ -397,7 +431,6 @@ void drawTreeShadow(float x, float z, float h) {
 void drawAllObjects() {
     glEnable(GL_LIGHTING);
 
-    
     float treeData[][3] = {
         {-5,5,0},{5,5,1},{0,-5,0.5f},{-8,-8,0.3f},{8,-5,0.7f},{3,10,0},{-5,15,0.4f},{12,8,0.6f},
         {-70,-20,0},{-75,0,0.5f},{-72,20,0.3f},{-68,40,0.7f},{-80,-40,0.2f},{-65,-55,0.8f},{-78,55,0.1f},
@@ -416,7 +449,6 @@ void drawAllObjects() {
         drawLightPoleAt(p.x, p.z, rot);
     }
 
-    
     drawBuilding(-75, -15, 12, 8, 10, 0.82f, 0.82f, 0.85f);
     drawBuilding(-75, 10, 10, 7, 8, 0.75f, 0.78f, 0.82f);
     drawBuilding(62, -15, 10, 8, 9, 0.80f, 0.76f, 0.76f);
@@ -424,18 +456,23 @@ void drawAllObjects() {
     drawBuilding(-20, -75, 14, 6, 7, 0.78f, 0.75f, 0.70f);
     drawBuilding(10, -75, 12, 6, 9, 0.82f, 0.80f, 0.75f);
 
-    
     drawTribune(55, -8, 18, 6, 90);
     drawTribune(-60, -5, 16, 5, -90);
     drawTribune(-15, 58, 20, 4, 180);
     drawTribune(-10, -62, 18, 4, 0);
 
-    
-    float coneData[][2] = { {-12,46},{-14,44},{-16,42},{-18,40},{-16,35},{-14,33},{-52,8},{-54,0},{-52,-8},{-48,-16},{-25,-48},{-10,-53},{8,-53},{25,-50},{47,35},{42,46},{32,50},{18,52} };
-    int numCones = sizeof(coneData) / sizeof(coneData[0]);
-    for (int i = 0; i < numCones; i++) drawCone(coneData[i][0], coneData[i][1]);
+    // Conuri - deseneaza din knockableCones (cu animatie cadere)
+    for (auto& c : knockableCones) {
+        glPushMatrix();
+        glTranslatef(c.curX, 0, c.curZ);
+        if (c.knocked) {
+            glRotatef(c.fallAngle, c.fallAxis[1], 0, -c.fallAxis[0]);
+        }
+        glTranslatef(-c.curX, 0, -c.curZ);
+        drawCone(c.curX, c.curZ);
+        glPopMatrix();
+    }
 
-    
     float billData[][3] = { {58,-5,90},{58,5,90},{-58,15,0},{-60,0,0},{-58,-15,0},{-5,-58,90},{15,-58,90},{35,-58,90},{45,50,45},{25,58,0} };
     int numBills = sizeof(billData) / sizeof(billData[0]);
     for (int i = 0; i < numBills; i++) drawBillboard(billData[i][0], billData[i][1], billData[i][2], i);
@@ -445,42 +482,36 @@ void drawAllObjects() {
 void drawShadows() {
     glDisable(GL_LIGHTING);
     glDisable(GL_TEXTURE_2D);
-    
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glColor4f(0.0f, 0.0f, 0.0f, 0.35f);
-
-    
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(-2.0f, -2.0f);
 
-   
     glPushMatrix();
     setShadowMatrix(sunDir[0], sunDir[1], sunDir[2], sunDir[3]);
 
-    
     float treeData[][3] = {
         {-5,5,4},{5,5,5},{0,-5,4.5f},{-8,-8,3.8f},{8,-5,4.7f},{3,10,4},{-5,15,4.4f},{12,8,4.6f},
         {-70,-20,4},{-75,0,4.5f},{-72,20,4.3f},{70,-20,4.4f},{75,0,4},{72,20,4.6f},
     };
     for (int i = 0; i < 14; i++) drawTreeShadow(treeData[i][0], treeData[i][1], treeData[i][2]);
 
-    
     for (auto& p : polePositions) drawPoleShadow(p.x, p.z);
+
+    // ===== C1: Umbra masina =====
+    playerCar.drawShadow();
 
     glPopMatrix();
 
-    
     if (nightMode && polePositions.size() > 0) {
         int maxShadowLights = 4;
         int step = fmaxf(1, (int)polePositions.size() / maxShadowLights);
         for (int li = 0; li < (int)polePositions.size() && li / step < maxShadowLights; li += step) {
             auto& lp = polePositions[li];
-            float lh = 6.2f; 
+            float lh = 6.2f;
             glPushMatrix();
-           
             setShadowMatrix(lp.x, lh, lp.z, 1.0f);
-           
             for (int i = 0; i < 14; i++) {
                 float dx = treeData[i][0] - lp.x, dz = treeData[i][1] - lp.z;
                 if (sqrtf(dx * dx + dz * dz) < 30.0f)
@@ -497,12 +528,10 @@ void drawShadows() {
 
 //CONFIGUREAZA LUMINILE 
 void setupLights() {
-    
     GLfloat sunAmb[] = { 0.30f,0.28f,0.25f,1.0f };
     GLfloat sunDiff[] = { 1.00f,0.95f,0.80f,1.0f };
     GLfloat sunSpec[] = { 0.50f,0.50f,0.40f,1.0f };
     if (nightMode) {
-        
         sunAmb[0] = 0.05f; sunAmb[1] = 0.05f; sunAmb[2] = 0.10f;
         sunDiff[0] = 0.15f; sunDiff[1] = 0.15f; sunDiff[2] = 0.25f;
         sunSpec[0] = 0.10f; sunSpec[1] = 0.10f; sunSpec[2] = 0.15f;
@@ -513,11 +542,9 @@ void setupLights() {
     glLightfv(GL_LIGHT0, GL_SPECULAR, sunSpec);
     glEnable(GL_LIGHT0);
 
-   
     for (int i = 1; i < MAX_LIGHTS; i++) glDisable(GL_LIGHT0 + i);
 
     if (nightMode && polePositions.size() > 0) {
-       
         int maxStreetLights = 7;
         int step = fmaxf(1, (int)polePositions.size() / maxStreetLights);
         int lightIdx = 1;
@@ -526,13 +553,12 @@ void setupLights() {
             GLenum lightID = GL_LIGHT0 + lightIdx;
             GLfloat pos[] = { lp.x,6.2f,lp.z,1.0f };
             GLfloat amb[] = { 0.02f,0.02f,0.01f,1.0f };
-            GLfloat diff[] = { 1.0f,0.90f,0.55f,1.0f }; 
+            GLfloat diff[] = { 1.0f,0.90f,0.55f,1.0f };
             GLfloat spec[] = { 0.5f,0.45f,0.2f,1.0f };
             glLightfv(lightID, GL_POSITION, pos);
             glLightfv(lightID, GL_AMBIENT, amb);
             glLightfv(lightID, GL_DIFFUSE, diff);
             glLightfv(lightID, GL_SPECULAR, spec);
-            
             glLightf(lightID, GL_CONSTANT_ATTENUATION, 1.0f);
             glLightf(lightID, GL_LINEAR_ATTENUATION, 0.05f);
             glLightf(lightID, GL_QUADRATIC_ATTENUATION, 0.008f);
@@ -546,14 +572,28 @@ void setupLights() {
 void applyCamera() {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
+
+    // ===== C1: Camera follow masina =====
+    if (cameraFollow) {
+        float rad = playerCar.angle * PI / 180.0f;
+        float behindDist = 12.0f;
+        float heightAbove = 5.0f;
+        float eyeX = playerCar.x - sinf(rad) * behindDist;
+        float eyeY = playerCar.y + heightAbove;
+        float eyeZ = playerCar.z - cosf(rad) * behindDist;
+        float lookX = playerCar.x + sinf(rad) * 5.0f;
+        float lookY = playerCar.y + 1.0f;
+        float lookZ = playerCar.z + cosf(rad) * 5.0f;
+        gluLookAt(eyeX, eyeY, eyeZ, lookX, lookY, lookZ, 0, 1, 0);
+        return;
+    }
+
     if (firstPerson) {
-        
         glRotatef(-camPitch, 1, 0, 0);
         glRotatef(-camYaw, 0, 1, 0);
         glTranslatef(-camX, -camY, -camZ);
     }
     else {
-        
         float rad = camYaw * PI / 180.0f;
         float pitch = camPitch * PI / 180.0f;
         float dx = -sinf(rad) * cosf(pitch) * camDist;
@@ -565,42 +605,216 @@ void applyCamera() {
     }
 }
 
+// ===== C1+C2: UPDATE LOGICA =====
+void updateGame(float dt) {
+    // Win timer
+    if (raceWon) {
+        winTimer -= dt;
+        if (winTimer <= 0) winTimer = 0;
+        return;  // opreste jocul dupa victorie
+    }
+
+    // Update masina
+    playerCar.update(dt, keyArrowUp, keyArrowDown, keyArrowLeft, keyArrowRight,
+        trackSpline, ROAD_WIDTH);
+
+    // === LAP DETECTION ===
+    // Linia de start e la trackSpline[0], perpendiculara pe directia drumului
+    Vec2 startPt = trackSpline[0];
+    Vec2 nextPt = trackSpline[1];
+    // Directia drumului la start
+    float dirX = nextPt.x - startPt.x;
+    float dirZ = nextPt.z - startPt.z;
+    float dirLen = sqrtf(dirX * dirX + dirZ * dirZ);
+    if (dirLen > 0.001f) { dirX /= dirLen; dirZ /= dirLen; }
+    // Vector de la start la masina (proiectat pe directia drumului)
+    float toCarX = playerCar.x - startPt.x;
+    float toCarZ = playerCar.z - startPt.z;
+    float dotAlong = toCarX * dirX + toCarZ * dirZ;  // pozitiv = dupa linie
+    // Distanta laterala de la linia de start
+    float crossDist = fabsf(toCarX * (-dirZ) + toCarZ * dirX);
+
+    if (crossDist < ROAD_WIDTH + 2.0f) {  // aproape de drum
+        if (dotAlong > 1.0f && dotAlong < 8.0f && !crossedStart) {
+            // Tocmai a trecut linia (e putin dupa ea, in directia corecta)
+            crossedStart = true;
+            lapCount++;
+            printf("=== LAP %d / %d ===\n", lapCount, lapTarget);
+            if (lapCount >= lapTarget) {
+                raceWon = true;
+                winTimer = 10.0f;
+                printf("!!! FELICITARI - AI CASTIGAT CURSA !!!\n");
+            }
+        }
+        if (dotAlong < -5.0f) {
+            // S-a indepartat destul inapoi - permite urmatoarea detectie
+            crossedStart = false;
+        }
+    }
+
+    // Coliziuni masina-cladiri si tribune
+    for (auto& box : buildingBoxes) {
+        if (checkCarAABB(playerCar, box)) {
+            resolveCarBuilding(playerCar, box);
+        }
+    }
+
+    // Coliziuni masina-conuri (knockable - cad, nu blocheaza)
+    for (auto& cone : knockableCones) {
+        if (checkCarCone(playerCar, cone)) {
+            knockCone(playerCar, cone);
+        }
+    }
+    updateCones(knockableCones, dt);
+
+    // Coliziuni masina-stalpi (solide)
+    for (auto& pole : poleColliders) {
+        if (checkCarCircle(playerCar, pole.x, pole.z, pole.radius)) {
+            resolveCarCircle(playerCar, pole.x, pole.z, pole.radius);
+        }
+    }
+
+    // C2: Update ambulante
+    int splineSize = (int)trackSpline.size();
+    for (int i = 0; i < NUM_AMBULANCES; i++) {
+        ambulances[i].update(dt, trackSpline, splineSize);
+
+        // Coliziune masina-ambulanta
+        if (checkCarAmbulance(playerCar, ambulances[i])) {
+            resolveCarAmbulance(playerCar, ambulances[i]);
+        }
+    }
+
+    // Update pietoni
+    for (int i = 0; i < NUM_PEDESTRIANS; i++) {
+        pedestrians[i].update(dt, trackSpline, ROAD_WIDTH);
+
+        // Coliziune masina-pieton
+        if (!pedestrians[i].hit && pedestrians[i].isCrossing) {
+            if (checkCarPedestrian(playerCar, pedestrians[i])) {
+                pedestrians[i].onHit();
+                playerCar.speed *= 0.3f;
+                printf("ATENTIE: Pieton lovit!\n");
+            }
+        }
+    }
+}
+
 //DISPLAY 
 void display() {
-    
     if (nightMode) glClearColor(0.02f, 0.03f, 0.08f, 1.0f);
     else          glClearColor(0.50f, 0.75f, 1.00f, 1.0f);
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-    applyCamera();
+    // ===== C1: Update logica =====
+    float dt = getDeltaTime();
+    updateGame(dt);
 
-    
+    applyCamera();
     setupLights();
 
-    
     glPushMatrix();
-    glTranslatef(camX, camY, camZ);
+    if (cameraFollow) {
+        // Skybox centrat pe camera follow
+        float rad = playerCar.angle * PI / 180.0f;
+        float eyeX = playerCar.x - sinf(rad) * 12.0f;
+        float eyeY = playerCar.y + 5.0f;
+        float eyeZ = playerCar.z - cosf(rad) * 12.0f;
+        glTranslatef(eyeX, eyeY, eyeZ);
+    }
+    else {
+        glTranslatef(camX, camY, camZ);
+    }
     drawSkybox();
     glPopMatrix();
 
-    
     drawTerrain();
     drawCircuit();
     drawBarriers();
     drawStartLine();
-
-    
     drawShadows();
-
-    
     drawAllObjects();
+
+    // ===== C1+C2: Deseneaza masina, pietoni, ambulante =====
+    playerCar.draw();
+    for (int i = 0; i < NUM_PEDESTRIANS; i++) {
+        pedestrians[i].draw();
+    }
+    for (int i = 0; i < NUM_AMBULANCES; i++) {
+        ambulances[i].draw();
+    }
+
+    // ===== HUD =====
+    glDisable(GL_LIGHTING);
+    glDisable(GL_DEPTH_TEST);
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+    gluOrtho2D(0, winW, 0, winH);
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+
+    // Viteza
+    char speedText[64];
+    sprintf(speedText, "Viteza: %.0f km/h", fabsf(playerCar.speed) * 3.6f);
+    glColor3f(1, 1, 1);
+    glRasterPos2f(20, winH - 30);
+    for (char* c = speedText; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+
+    // Lap counter
+    char lapText[64];
+    sprintf(lapText, "Lap: %d / %d", lapCount, lapTarget);
+    glColor3f(1.0f, 1.0f, 0.2f);
+    glRasterPos2f(20, winH - 55);
+    for (char* c = lapText; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+
+    // Mod camera
+    const char* camText = cameraFollow ? "[C] Camera: FOLLOW" : "[C] Camera: FREE";
+    glColor3f(0.8f, 0.8f, 0.8f);
+    glRasterPos2f(20, winH - 80);
+    for (const char* c = camText; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+
+    // Mesaj victorie
+    if (raceWon) {
+        // Fundal semi-transparent
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(0.0f, 0.0f, 0.0f, 0.6f);
+        glBegin(GL_QUADS);
+        glVertex2f(winW * 0.2f, winH * 0.35f);
+        glVertex2f(winW * 0.8f, winH * 0.35f);
+        glVertex2f(winW * 0.8f, winH * 0.65f);
+        glVertex2f(winW * 0.2f, winH * 0.65f);
+        glEnd();
+        glDisable(GL_BLEND);
+
+        // Text FELICITARI
+        const char* winText = "FELICITARI! AI CASTIGAT CURSA!";
+        glColor3f(1.0f, 1.0f, 0.0f);
+        float textW = 0;
+        for (const char* c = winText; *c; c++) textW += glutBitmapWidth(GLUT_BITMAP_TIMES_ROMAN_24, *c);
+        glRasterPos2f((winW - textW) * 0.5f, winH * 0.52f);
+        for (const char* c = winText; *c; c++) glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, *c);
+
+        // Sub-text
+        const char* subText = "Apasa R pentru a reporni cursa";
+        glColor3f(1.0f, 1.0f, 1.0f);
+        float subW = 0;
+        for (const char* c = subText; *c; c++) subW += glutBitmapWidth(GLUT_BITMAP_HELVETICA_18, *c);
+        glRasterPos2f((winW - subW) * 0.5f, winH * 0.44f);
+        for (const char* c = subText; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+    }
+
+    glMatrixMode(GL_PROJECTION); glPopMatrix();
+    glMatrixMode(GL_MODELVIEW); glPopMatrix();
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
 
     glutSwapBuffers();
 }
 
 //INIT 
 void init() {
+    srand((unsigned)time(NULL));  // C1: seed random pt pietoni
+
     if (nightMode) glClearColor(0.02f, 0.03f, 0.08f, 1.0f);
     else          glClearColor(0.50f, 0.75f, 1.00f, 1.0f);
     glEnable(GL_DEPTH_TEST);
@@ -611,11 +825,9 @@ void init() {
     glEnable(GL_COLOR_MATERIAL);
     glEnable(GL_LIGHTING);
 
-    
     trackSpline = buildTrackSpline(20);
     printf("Circuit: %d puncte\n", (int)trackSpline.size());
 
-   
     int n = (int)trackSpline.size();
     int poleStep = n / 16;
     for (int i = 0; i < n; i += poleStep) {
@@ -631,6 +843,40 @@ void init() {
 
     generateTerrain();
 
+    // ===== C1: Init masina =====
+    playerCar.init();
+    // Pozitioneaza masina pe linia de start
+    playerCar.x = trackSpline[0].x;
+    playerCar.z = trackSpline[0].z;
+    // Calculeaza directia initiala
+    Vec2 startDir = trackSpline[1];
+    playerCar.angle = atan2f(startDir.x - trackSpline[0].x, startDir.z - trackSpline[0].z) * 180.0f / PI;
+    playerCar.updateCorners();
+
+    // ===== C1: Init pietoni =====
+    for (int i = 0; i < NUM_PEDESTRIANS; i++) {
+        pedestrians[i].init(trackSpline, ROAD_WIDTH);
+    }
+
+    // ===== C1+C2: Init coliziuni complete =====
+    buildingBoxes = getBuildingAABBs();
+    knockableCones = getKnockableCones();
+    poleColliders = getPoleColliders(polePositions);
+    printf("Collidere AABB: %d (cladiri+tribune)\n", (int)buildingBoxes.size());
+    printf("Conuri knockable: %d, Stalpi: %d\n", (int)knockableCones.size(), (int)poleColliders.size());
+
+    // ===== C2: Init ambulante =====
+    // Ambulanta 1: pe exteriorul drumului, viteza moderata
+    ambulances[0].init(ROAD_WIDTH + 3.5f, 8.0f);
+    ambulances[0].splinePos = 0.0f;
+    // Ambulanta 2: pe interiorul drumului, directia opusa (viteza negativa)
+    ambulances[1].init(-(ROAD_WIDTH + 3.5f), 6.0f);
+    ambulances[1].splinePos = (float)(trackSpline.size() / 2);
+    printf("Ambulante: %d\n", NUM_AMBULANCES);
+
+    // Init timer
+    lastTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+
 #define PATH "C:\\Users\\Darius\\Documents\\FACULTATE_ACE_LICENTA\\FACULTATE_ANUL_IV_SEM_II\\SPG\\SPG_PROIECT\\textures\\"
     texGrass = loadTexture(PATH"grass.jpg", 80, 160, 60);
     texSkyFront = loadTexture(PATH"sky_front.jpg", 100, 160, 220);
@@ -642,14 +888,16 @@ void init() {
     texRoad = loadTexture(PATH"road.jpg", 60, 60, 60);
 #undef PATH
 
-    printf("\n=== SPG P1+P2+P3 ===\n");
-    printf("  W/S/A/D + Q/E   - miscare\n");
+    printf("\n=== SPG P1+P2+P3+C1+C2 ===\n");
+    printf("  SAGETI          - controleaza masina\n");
+    printf("  W/S/A/D + Q/E   - miscare camera (mod free)\n");
     printf("  Mouse stanga    - rotire camera\n");
     printf("  Mouse dreapta   - rotire camera alternativa\n");
     printf("  Scroll          - zoom in/out\n");
+    printf("  C               - toggle camera FOLLOW / FREE\n");
     printf("  F               - toggle first/third person\n");
     printf("  N               - toggle zi / noapte\n");
-    printf("  R               - reset camera\n");
+    printf("  R               - reset camera + masina\n");
     printf("  ESC             - iesire\n\n");
 }
 
@@ -666,7 +914,6 @@ void reshape(int w, int h) {
 void mouseButton(int btn, int state, int x, int y) {
     if (btn == GLUT_LEFT_BUTTON) { leftDown = (state == GLUT_DOWN); lastMouseX = x; lastMouseY = y; }
     if (btn == GLUT_RIGHT_BUTTON) { rightDown = (state == GLUT_DOWN); lastMouseX = x; lastMouseY = y; }
-    // Scroll zoom
     if (btn == 3) { camDist = fmaxf(1.0f, camDist - 1.5f); glutPostRedisplay(); }
     if (btn == 4) { camDist = fminf(80.0f, camDist + 1.5f); glutPostRedisplay(); }
 }
@@ -692,7 +939,6 @@ void keyboard(unsigned char key, int x, int y) {
     case'd':case'D':camX += cosf(rad) * spd; camZ -= sinf(rad) * spd; break;
     case'q':case'Q':camY += spd; break;
     case'e':case'E':camY -= spd; break;
-        // P3: taste noi
     case'f':case'F':
         firstPerson = !firstPerson;
         printf("Camera: %s\n", firstPerson ? "First Person" : "Third Person");
@@ -701,15 +947,50 @@ void keyboard(unsigned char key, int x, int y) {
         nightMode = !nightMode;
         printf("Mod: %s\n", nightMode ? "NOAPTE" : "ZI");
         break;
+        // ===== C1: Camera follow =====
+    case'c':case'C':
+        cameraFollow = !cameraFollow;
+        printf("Camera: %s\n", cameraFollow ? "FOLLOW CAR" : "FREE");
+        break;
     case'r':case'R':
         camX = 0; camY = 8; camZ = 30; camYaw = 0; camPitch = -15; camDist = 1.0f;
-        printf("Camera resetata\n");
+        // Reset masina pe linia de start
+        playerCar.x = trackSpline[0].x;
+        playerCar.z = trackSpline[0].z;
+        playerCar.speed = 0;
+        playerCar.angle = atan2f(trackSpline[1].x - trackSpline[0].x,
+            trackSpline[1].z - trackSpline[0].z) * 180.0f / PI;
+        // Reset lap counter
+        lapCount = 0;
+        crossedStart = false;
+        raceWon = false;
+        winTimer = 0;
+        printf("Reset complet - cursa reincepe!\n");
         break;
     case 27:exit(0);
     }
     float th = getHeight(camX, camZ);
     if (camY < th + 1.8f)camY = th + 1.8f;
     glutPostRedisplay();
+}
+
+// ===== C1: Taste speciale (sageti) =====
+void specialKeyDown(int key, int x, int y) {
+    switch (key) {
+    case GLUT_KEY_UP:    keyArrowUp = true; break;
+    case GLUT_KEY_DOWN:  keyArrowDown = true; break;
+    case GLUT_KEY_LEFT:  keyArrowLeft = true; break;
+    case GLUT_KEY_RIGHT: keyArrowRight = true; break;
+    }
+}
+
+void specialKeyUp(int key, int x, int y) {
+    switch (key) {
+    case GLUT_KEY_UP:    keyArrowUp = false; break;
+    case GLUT_KEY_DOWN:  keyArrowDown = false; break;
+    case GLUT_KEY_LEFT:  keyArrowLeft = false; break;
+    case GLUT_KEY_RIGHT: keyArrowRight = false; break;
+    }
 }
 
 void idle() { glutPostRedisplay(); }
@@ -719,13 +1000,16 @@ int main(int argc, char** argv) {
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH | GLUT_STENCIL);
     glutInitWindowSize(1280, 720);
-    glutCreateWindow("SPG_PROIECT - P1+P2+P3");
+    glutCreateWindow("SPG_PROIECT - P1+P2+P3+C1+C2");
     init();
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);
     glutMouseFunc(mouseButton);
     glutMotionFunc(mouseMove);
+    // ===== C1: Sageti =====
+    glutSpecialFunc(specialKeyDown);
+    glutSpecialUpFunc(specialKeyUp);
     glutIdleFunc(idle);
     glutMainLoop();
     return 0;
